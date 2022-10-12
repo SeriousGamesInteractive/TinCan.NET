@@ -14,16 +14,19 @@
     See the License for the specific language governing permissions and
     limitations under the License.
 */
+
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
 using System.Text;
 using System.Threading.Tasks;
-using System.Web;
 using Newtonsoft.Json.Linq;
 using TinCan.Documents;
+using TinCan.Json;
 using TinCan.LrsResponses;
+using UnityEngine;
+using UnityEngine.Networking;
 
 namespace TinCan
 {
@@ -40,12 +43,14 @@ namespace TinCan
         }
 
         public RemoteLrs() { }
+
         public RemoteLrs(Uri endpoint, TCAPIVersion version, string username, string password)
         {
             Endpoint = endpoint;
             Version = version;
             SetAuth(username, password);
         }
+
         public RemoteLrs(string endpoint, TCAPIVersion version, string username, string password) : this(new Uri(endpoint), version, username, password) { }
         public RemoteLrs(string endpoint, string username, string password) : this(endpoint, TCAPIVersion.Latest(), username, password) { }
 
@@ -69,6 +74,54 @@ namespace TinCan
             public Exception Ex { get; set; }
 
             public MyHttpResponse() { }
+
+            public MyHttpResponse(UnityWebRequest request, UnityWebRequest.Result result)
+            {
+                HttpStatusCode statusCode;
+                switch (result)
+                {
+                    case UnityWebRequest.Result.Success:
+                        statusCode = HttpStatusCode.OK;
+                        break;
+                    default:
+                        statusCode = HttpStatusCode.NotImplemented;
+                        break;
+                }
+
+                Status = statusCode;
+
+                Dictionary<string, string> responseHeaders = request.GetResponseHeaders();
+                Debug.Log($"{responseHeaders.Count} responseHeaders");
+                foreach (KeyValuePair<string, string> pair in responseHeaders)
+                {
+                    Debug.Log($"  {pair.Key}:{pair.Value}");
+                }
+
+                if (responseHeaders.ContainsKey("Etag"))
+                {
+                    Etag = responseHeaders["Etag"];
+                }
+
+                try
+                {
+                    if (responseHeaders.ContainsKey("Last-Modified"))
+                    {
+                        LastModified = DateTime.Parse(responseHeaders["Last-Modified"]);
+                    }
+                    else
+                    {
+                        LastModified = DateTime.Now;
+                    }
+                }
+                catch
+                {
+                    //sometimes will throw an exception, just ignore
+                }
+
+                DownloadHandler downloadHandler = request.downloadHandler;
+                Content = downloadHandler.data;
+            }
+
             public MyHttpResponse(HttpWebResponse webResp)
             {
                 Status = webResp.StatusCode;
@@ -84,14 +137,20 @@ namespace TinCan
                     //sometimes will throw an exception, just ignore
                 }
 
-                using (var stream = webResp.GetResponseStream())
+                using (Stream stream = webResp.GetResponseStream())
                 {
-                    Content = ReadFully(stream, (int)webResp.ContentLength);
+                    Content = ReadFully(stream, (int) webResp.ContentLength);
                 }
             }
         }
 
-        private async Task<MyHttpResponse> MakeRequest(MyHttpRequest req)
+        private Task<MyHttpResponse> MakeRequest(MyHttpRequest req)
+        {
+            //return MakeHttpRequest(req);
+            return MakeUnityRequest(req);
+        }
+
+        private async Task<MyHttpResponse> MakeHttpRequest(MyHttpRequest req)
         {
             string url;
             if (req.Resource.StartsWith("http", StringComparison.InvariantCultureIgnoreCase))
@@ -101,23 +160,27 @@ namespace TinCan
             else
             {
                 url = Endpoint.ToString();
-                if (! url.EndsWith("/") && ! req.Resource.StartsWith("/")) {
+                if (!url.EndsWith("/") && !req.Resource.StartsWith("/"))
+                {
                     url += "/";
                 }
+
                 url += req.Resource;
             }
 
             if (req.QueryParams != null)
             {
-                var qs = "";
-                foreach (var entry in req.QueryParams)
+                string qs = "";
+                foreach (KeyValuePair<string, string> entry in req.QueryParams)
                 {
                     if (qs != "")
                     {
                         qs += "&";
                     }
-                    qs += HttpUtility.UrlEncode(entry.Key) + "=" + HttpUtility.UrlEncode(entry.Value);
+
+                    qs += Uri.EscapeUriString(entry.Key) + "=" + Uri.EscapeUriString(entry.Value);
                 }
+
                 if (qs != "")
                 {
                     url += "?" + qs;
@@ -125,7 +188,7 @@ namespace TinCan
             }
 
             // TODO: handle special properties we recognize, such as content type, modified since, etc.
-            var webReq = (HttpWebRequest)WebRequest.Create(url);
+            HttpWebRequest webReq = (HttpWebRequest) WebRequest.Create(url);
             webReq.Method = req.Method;
 
             webReq.Headers.Add("X-Experience-API-Version", Version.ToString());
@@ -133,9 +196,10 @@ namespace TinCan
             {
                 webReq.Headers.Add("Authorization", Auth);
             }
+
             if (req.Headers != null)
             {
-                foreach (var entry in req.Headers)
+                foreach (KeyValuePair<string, string> entry in req.Headers)
                 {
                     webReq.Headers.Add(entry.Key, entry.Value);
                 }
@@ -146,7 +210,7 @@ namespace TinCan
             if (req.Content != null)
             {
                 webReq.ContentLength = req.Content.Length;
-                using (var stream = webReq.GetRequestStream())
+                using (Stream stream = webReq.GetRequestStream())
                 {
                     stream.Write(req.Content, 0, req.Content.Length);
                 }
@@ -156,9 +220,9 @@ namespace TinCan
 
             try
             {
-                using (var webResp = await webReq.GetResponseAsync())
+                using (WebResponse webResp = await webReq.GetResponseAsync())
                 {
-                    var test = webResp as HttpWebResponse;
+                    HttpWebResponse test = webResp as HttpWebResponse;
                     resp = new MyHttpResponse(test);
                 }
             }
@@ -166,7 +230,7 @@ namespace TinCan
             {
                 if (ex.Response != null)
                 {
-                    using (var webResp = (HttpWebResponse)ex.Response)
+                    using (HttpWebResponse webResp = (HttpWebResponse) ex.Response)
                     {
                         resp = new MyHttpResponse(webResp);
                     }
@@ -178,8 +242,118 @@ namespace TinCan
                         Content = Encoding.UTF8.GetBytes("Web exception without '.Response'")
                     };
                 }
+
                 resp.Ex = ex;
             }
+
+            return resp;
+        }
+
+        private async Task<MyHttpResponse> MakeUnityRequest(MyHttpRequest req)
+        {
+            string url;
+            if (req.Resource.StartsWith("http", StringComparison.InvariantCultureIgnoreCase))
+            {
+                url = req.Resource;
+            }
+            else
+            {
+                url = Endpoint.ToString();
+                if (!url.EndsWith("/") && !req.Resource.StartsWith("/"))
+                {
+                    url += "/";
+                }
+
+                url += req.Resource;
+            }
+
+            if (req.QueryParams != null)
+            {
+                string qs = "";
+                foreach (KeyValuePair<string, string> entry in req.QueryParams)
+                {
+                    if (qs != "")
+                    {
+                        qs += "&";
+                    }
+
+                    qs += Uri.EscapeUriString(entry.Key) + "=" + Uri.EscapeUriString(entry.Value);
+                }
+
+                if (qs != "")
+                {
+                    url += "?" + qs;
+                }
+            }
+
+            Debug.Log($"WebRequest Create {req.Method} {url}");
+            // TODO: handle special properties we recognize, such as content type, modified since, etc.
+            UnityWebRequest request = new UnityWebRequest(url);
+            request.method = req.Method;
+            request.downloadHandler = (DownloadHandler) new DownloadHandlerBuffer();
+
+            request.SetRequestHeader("X-Experience-API-Version", Version.ToString());
+            if (Auth != null)
+            {
+                request.SetRequestHeader("Authorization", Auth);
+            }
+
+            if (req.Headers != null)
+            {
+                foreach (KeyValuePair<string, string> entry in req.Headers)
+                {
+                    req.Headers.Add(entry.Key, entry.Value);
+                }
+            }
+
+            req.ContentType ??= "application/octet-stream";
+            request.SetRequestHeader("Content-Type", req.ContentType);
+
+            Debug.Log($"ContentType:{req.ContentType}");
+
+            if (req.Content != null)
+            {
+                request.uploadHandler = (UploadHandler) new UploadHandlerRaw(req.Content);
+                //request.uploadHandler.contentType = "application/x-www-form-urlencoded";
+                // request.ContentLength = req.content.Length;
+                // using (var stream = request.GetRequestStream())
+                // {
+                //     stream.Write(req.content, 0, req.content.Length);
+                // }
+            }
+
+            MyHttpResponse resp = null;
+
+            try
+            {
+                UnityWebRequest.Result result = await request.SendWebRequest();
+                resp = new MyHttpResponse(request, result);
+                // using (var webResp = (HttpWebResponse)request.GetResponse())
+                // {
+                //     resp = new MyHTTPResponse(webResp);
+                // }
+            }
+            catch (WebException ex)
+            {
+                if (ex.Response != null)
+                {
+                    using (HttpWebResponse webResp = (HttpWebResponse) ex.Response)
+                    {
+                        resp = new MyHttpResponse(webResp);
+                    }
+                }
+                else
+                {
+                    resp = new MyHttpResponse
+                    {
+                        Content = Encoding.UTF8.GetBytes("Web exception without '.Response'")
+                    };
+                }
+
+                resp.Ex = ex;
+            }
+
+            Debug.Log($"HttpWebResponse {resp}");
 
             return resp;
         }
@@ -202,8 +376,8 @@ namespace TinCan
                 initialLength = 32768;
             }
 
-            var buffer = new byte[initialLength];
-            var read = 0;
+            byte[] buffer = new byte[initialLength];
+            int read = 0;
 
             int chunk;
             while ((chunk = stream.Read(buffer, read, buffer.Length - read)) > 0)
@@ -214,7 +388,7 @@ namespace TinCan
                 // any more information
                 if (read == buffer.Length)
                 {
-                    var nextByte = stream.ReadByte();
+                    int nextByte = stream.ReadByte();
 
                     // End of stream? If so, we're done
                     if (nextByte == -1)
@@ -224,22 +398,23 @@ namespace TinCan
 
                     // Nope. Resize the buffer, put in the byte we've just
                     // read, and continue
-                    var newBuffer = new byte[buffer.Length * 2];
+                    byte[] newBuffer = new byte[buffer.Length * 2];
                     Array.Copy(buffer, newBuffer, buffer.Length);
-                    newBuffer[read] = (byte)nextByte;
+                    newBuffer[read] = (byte) nextByte;
                     buffer = newBuffer;
                     read++;
                 }
             }
+
             // Buffer is now too big. Shrink it.
-            var ret = new byte[read];
+            byte[] ret = new byte[read];
             Array.Copy(buffer, ret, read);
             return ret;
         }
 
         private async Task<MyHttpResponse> GetDocument(string resource, Dictionary<string, string> queryParams, Document document)
         {
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = resource,
@@ -247,7 +422,7 @@ namespace TinCan
                 ContentType = "application/json"
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status == HttpStatusCode.OK)
             {
                 document.Content = res.Content;
@@ -261,16 +436,16 @@ namespace TinCan
 
         private async Task<ProfileKeysLrsResponse> GetProfileKeys(string resource, Dictionary<string, string> queryParams)
         {
-            var r = new ProfileKeysLrsResponse();
+            ProfileKeysLrsResponse r = new ProfileKeysLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = resource,
                 QueryParams = queryParams
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -281,11 +456,13 @@ namespace TinCan
 
             r.Success = true;
 
-            var keys = JArray.Parse(Encoding.UTF8.GetString(res.Content));
-            if (keys.Count > 0) {
+            JArray keys = JArray.Parse(Encoding.UTF8.GetString(res.Content));
+            if (keys.Count > 0)
+            {
                 r.Content = new List<string>();
-                foreach (var key in keys) {
-                    r.Content.Add((string)key);
+                foreach (JToken key in keys)
+                {
+                    r.Content.Add((string) key);
                 }
             }
 
@@ -294,9 +471,9 @@ namespace TinCan
 
         private async Task<LrsResponse> SaveDocument(string resource, Dictionary<string, string> queryParams, Document document)
         {
-            var r = new LrsResponse();
+            LrsResponse r = new LrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "PUT",
                 Resource = resource,
@@ -306,15 +483,14 @@ namespace TinCan
             };
             if (!string.IsNullOrEmpty(document.Etag))
             {
-                req.Headers = new Dictionary<string, string> {{"If-Match", document.Etag}};
+                req.Headers = new Dictionary<string, string> { { "If-Match", document.Etag } };
             }
             else
             {
-                req.Headers = new Dictionary<string, string> {{"If-None-Match", "*"}};
+                req.Headers = new Dictionary<string, string> { { "If-None-Match", "*" } };
             }
-            
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.NoContent)
             {
                 r.Success = false;
@@ -330,16 +506,16 @@ namespace TinCan
 
         private async Task<LrsResponse> DeleteDocument(string resource, Dictionary<string, string> queryParams)
         {
-            var r = new LrsResponse();
+            LrsResponse r = new LrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "DELETE",
                 Resource = resource,
                 QueryParams = queryParams
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.NoContent)
             {
                 r.Success = false;
@@ -355,16 +531,16 @@ namespace TinCan
 
         private async Task<StatementLrsResponse> GetStatement(Dictionary<string, string> queryParams)
         {
-            var r = new StatementLrsResponse();
+            StatementLrsResponse r = new StatementLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = "statements",
                 QueryParams = queryParams
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -381,15 +557,15 @@ namespace TinCan
 
         public async Task<AboutLrsResponse> AboutAsync()
         {
-            var r = new AboutLrsResponse();
+            AboutLrsResponse r = new AboutLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = "about"
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -406,8 +582,8 @@ namespace TinCan
 
         public async Task<StatementLrsResponse> SaveStatementAsync(Statement statement)
         {
-            var r = new StatementLrsResponse();
-            var req = new MyHttpRequest
+            StatementLrsResponse r = new StatementLrsResponse();
+            MyHttpRequest req = new MyHttpRequest
             {
                 QueryParams = new Dictionary<string, string>(),
                 Resource = "statements"
@@ -426,7 +602,7 @@ namespace TinCan
             req.ContentType = "application/json";
             req.Content = Encoding.UTF8.GetBytes(statement.ToJson(Version));
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (statement.Id == null)
             {
                 if (res.Status != HttpStatusCode.OK)
@@ -437,10 +613,11 @@ namespace TinCan
                     return r;
                 }
 
-                var ids = JArray.Parse(Encoding.UTF8.GetString(res.Content));
-                statement.Id = new Guid((string)ids[0]);
+                JArray ids = JArray.Parse(Encoding.UTF8.GetString(res.Content));
+                statement.Id = new Guid((string) ids[0]);
             }
-            else {
+            else
+            {
                 if (res.Status != HttpStatusCode.NoContent)
                 {
                     r.Success = false;
@@ -455,9 +632,10 @@ namespace TinCan
 
             return r;
         }
+
         public async Task<StatementLrsResponse> VoidStatementAsync(Guid id, Agent agent)
         {
-            var voidStatement = new Statement
+            Statement voidStatement = new Statement
             {
                 Actor = agent,
                 Verb = new Verb
@@ -471,25 +649,27 @@ namespace TinCan
 
             return await SaveStatementAsync(voidStatement);
         }
+
         public async Task<StatementsResultLrsResponse> SaveStatementsAsync(List<Statement> statements)
         {
-            var r = new StatementsResultLrsResponse();
+            StatementsResultLrsResponse r = new StatementsResultLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Resource = "statements",
                 Method = "POST",
                 ContentType = "application/json"
             };
 
-            var jarray = new JArray();
-            foreach (var st in statements)
+            JArray jarray = new JArray();
+            foreach (Statement st in statements)
             {
                 jarray.Add(st.ToJObject(Version));
             }
+
             req.Content = Encoding.UTF8.GetBytes(jarray.ToString());
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -498,10 +678,10 @@ namespace TinCan
                 return r;
             }
 
-            var ids = JArray.Parse(Encoding.UTF8.GetString(res.Content));
-            for (var i = 0; i < ids.Count; i++)
+            JArray ids = JArray.Parse(Encoding.UTF8.GetString(res.Content));
+            for (int i = 0; i < ids.Count; i++)
             {
-                statements[i].Id = new Guid((string)ids[i]);
+                statements[i].Id = new Guid((string) ids[i]);
             }
 
             r.Success = true;
@@ -509,36 +689,39 @@ namespace TinCan
 
             return r;
         }
+
         public async Task<StatementLrsResponse> RetrieveStatementAsync(Guid id)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "statementId", id.ToString() }
             };
 
             return await GetStatement(queryParams);
         }
+
         public async Task<StatementLrsResponse> RetrieveVoidedStatementAsync(Guid id)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "voidedStatementId", id.ToString() }
             };
 
             return await GetStatement(queryParams);
         }
+
         public async Task<StatementsResultLrsResponse> QueryStatementsAsync(StatementsQuery query)
         {
-            var r = new StatementsResultLrsResponse();
+            StatementsResultLrsResponse r = new StatementsResultLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = "statements",
                 QueryParams = query.ToParameterMap(Version)
             };
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -552,21 +735,24 @@ namespace TinCan
 
             return r;
         }
+
         public async Task<StatementsResultLrsResponse> MoreStatementsAsync(StatementsResult result)
         {
-            var r = new StatementsResultLrsResponse();
+            StatementsResultLrsResponse r = new StatementsResultLrsResponse();
 
-            var req = new MyHttpRequest
+            MyHttpRequest req = new MyHttpRequest
             {
                 Method = "GET",
                 Resource = Endpoint.GetLeftPart(UriPartial.Authority)
             };
-            if (! req.Resource.EndsWith("/")) {
+            if (!req.Resource.EndsWith("/"))
+            {
                 req.Resource += "/";
             }
+
             req.Resource += result.More;
 
-            var res = await MakeRequest(req);
+            MyHttpResponse res = await MakeRequest(req);
             if (res.Status != HttpStatusCode.OK)
             {
                 r.Success = false;
@@ -576,7 +762,7 @@ namespace TinCan
             }
 
             r.Success = true;
-            var json = new Json.StringOfJson(Encoding.UTF8.GetString(res.Content));
+            StringOfJson json = new Json.StringOfJson(Encoding.UTF8.GetString(res.Content));
             r.Content = new StatementsResult(json);
 
             return r;
@@ -586,7 +772,7 @@ namespace TinCan
         public async Task<ProfileKeysLrsResponse> RetrieveStateIdsAsync(Activity activity, Agent agent,
             Guid? registration = null)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "activityId", activity.Id },
                 { "agent", agent.ToJson(Version) }
@@ -598,19 +784,20 @@ namespace TinCan
 
             return await GetProfileKeys("activities/state", queryParams);
         }
+
         public async Task<StateLrsResponse> RetrieveStateAsync(string id, Activity activity, Agent agent,
             Guid? registration = null)
         {
-            var r = new StateLrsResponse();
+            StateLrsResponse r = new StateLrsResponse();
 
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "stateId", id },
                 { "activityId", activity.Id },
                 { "agent", agent.ToJson(Version) }
             };
 
-            var state = new StateDocument
+            StateDocument state = new StateDocument
             {
                 Id = id,
                 Activity = activity,
@@ -623,7 +810,7 @@ namespace TinCan
                 state.Registration = registration;
             }
 
-            var resp = await GetDocument("activities/state", queryParams, state);
+            MyHttpResponse resp = await GetDocument("activities/state", queryParams, state);
             if (resp.Status != HttpStatusCode.OK && resp.Status != HttpStatusCode.NotFound)
             {
                 r.Success = false;
@@ -631,14 +818,16 @@ namespace TinCan
                 r.SetErrMsgFromBytes(resp.Content);
                 return r;
             }
+
             r.Success = true;
             r.Content = state;
 
             return r;
         }
+
         public async Task<LrsResponse> SaveStateAsync(StateDocument state)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "stateId", state.Id },
                 { "activityId", state.Activity.Id },
@@ -651,9 +840,10 @@ namespace TinCan
 
             return await SaveDocument("activities/state", queryParams, state);
         }
+
         public async Task<LrsResponse> DeleteStateAsync(StateDocument state)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "stateId", state.Id },
                 { "activityId", state.Activity.Id },
@@ -666,9 +856,10 @@ namespace TinCan
 
             return await DeleteDocument("activities/state", queryParams);
         }
+
         public async Task<LrsResponse> ClearStateAsync(Activity activity, Agent agent, Guid? registration = null)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "activityId", activity.Id },
                 { "agent", agent.ToJson(Version) }
@@ -684,30 +875,31 @@ namespace TinCan
         // TODO: since param
         public async Task<ProfileKeysLrsResponse> RetrieveActivityProfileIdsAsync(Activity activity)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "activityId", activity.Id }
             };
 
             return await GetProfileKeys("activities/profile", queryParams);
         }
+
         public async Task<ActivityProfileLrsResponse> RetrieveActivityProfileAsync(string id, Activity activity)
         {
-            var r = new ActivityProfileLrsResponse();
+            ActivityProfileLrsResponse r = new ActivityProfileLrsResponse();
 
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", id },
                 { "activityId", activity.Id }
             };
 
-            var profile = new ActivityProfileDocument
+            ActivityProfileDocument profile = new ActivityProfileDocument
             {
                 Id = id,
                 Activity = activity
             };
 
-            var resp = await GetDocument("activities/profile", queryParams, profile);
+            MyHttpResponse resp = await GetDocument("activities/profile", queryParams, profile);
             if (resp.Status != HttpStatusCode.OK && resp.Status != HttpStatusCode.NotFound)
             {
                 r.Success = false;
@@ -715,14 +907,16 @@ namespace TinCan
                 r.SetErrMsgFromBytes(resp.Content);
                 return r;
             }
+
             r.Success = true;
             r.Content = profile;
 
             return r;
         }
+
         public async Task<LrsResponse> SaveActivityProfileAsync(ActivityProfileDocument profile)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", profile.Id },
                 { "activityId", profile.Activity.Id }
@@ -730,9 +924,10 @@ namespace TinCan
 
             return await SaveDocument("activities/profile", queryParams, profile);
         }
+
         public async Task<LrsResponse> DeleteActivityProfileAsync(ActivityProfileDocument profile)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", profile.Id },
                 { "activityId", profile.Activity.Id }
@@ -745,31 +940,31 @@ namespace TinCan
         // TODO: since param
         public async Task<ProfileKeysLrsResponse> RetrieveAgentProfileIdsAsync(Agent agent)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "agent", agent.ToJson(Version) }
             };
 
             return await GetProfileKeys("agents/profile", queryParams);
         }
+
         public async Task<AgentProfileLrsResponse> RetrieveAgentProfileAsync(string id, Agent agent)
         {
-            var r = new AgentProfileLrsResponse();
+            AgentProfileLrsResponse r = new AgentProfileLrsResponse();
 
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", id },
                 { "agent", agent.ToJson(Version) }
             };
 
-            var profile = new AgentProfileDocument
+            AgentProfileDocument profile = new AgentProfileDocument
             {
                 Id = id,
                 Agent = agent
             };
 
-
-            var resp = await GetDocument("agents/profile", queryParams, profile);
+            MyHttpResponse resp = await GetDocument("agents/profile", queryParams, profile);
             if (resp.Status != HttpStatusCode.OK && resp.Status != HttpStatusCode.NotFound)
             {
                 r.Success = false;
@@ -787,9 +982,10 @@ namespace TinCan
 
             return r;
         }
+
         public async Task<LrsResponse> SaveAgentProfileAsync(AgentProfileDocument profile)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", profile.Id },
                 { "agent", profile.Agent.ToJson(Version) }
@@ -797,9 +993,10 @@ namespace TinCan
 
             return await SaveDocument("agents/profile", queryParams, profile);
         }
+
         public async Task<LrsResponse> DeleteAgentProfileAsync(AgentProfileDocument profile)
         {
-            var queryParams = new Dictionary<string, string>
+            Dictionary<string, string> queryParams = new Dictionary<string, string>
             {
                 { "profileId", profile.Id },
                 { "agent", profile.Agent.ToJson(Version) }

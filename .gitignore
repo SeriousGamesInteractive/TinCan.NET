@@ -119,3 +119,4 @@ Doc/Help/
 tmp/
 /.vs/TinCan
 /TinCan/Properties/PublishProfiles
+.idea/

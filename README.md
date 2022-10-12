@@ -7,12 +7,19 @@ Requires Unity Newton.Json from https://docs.unity3d.com/Packages/com.unity.nuge
 
 # About
 
-This project is a modification of Rustici Software's TinCan.NET Library https://github.com/RusticiSoftware/TinCan.NET and is licensed under the Apache 2.0 license. Also included is modifications from a pull request from github user "peturingi" to update the software for .NET Core, as well as add ActivityDefinition InteractionType. Both of these have not been merged into their master branch as of 8/7/18.
+This project is a modification of Rustici Software's TinCan.NET Library https://github.com/RusticiSoftware/TinCan.NET and is licensed under the Apache 2.0 license. 
+Forked from njvsvalhalla version https://github.com/njvsvalhalla/TinCan.NET
+Also included is modifications from a pull request from github user "peturingi" to update the software for .NET Core, as well as add ActivityDefinition InteractionType. Both of these have not been merged into their master branch as of 8/7/18.
 Pull requests included:
 https://github.com/RusticiSoftware/TinCan.NET/pull/35 (itself based on : https://github.com/RusticiSoftware/TinCan.NET/pull/17 from 2015, user olivergurnell)
 https://github.com/RusticiSoftware/TinCan.NET/pull/34
 
-Modifications done by myself:
+Modifications done by paulusul:
+* Added crude Unity web request usage to work with webgl.
+* Removed use of System.Web in favour of URI
+* Broke plain solution by referencing UnityEngine.dll, so only works in Unity
+
+Modifications done by njvsvalhalla:
 * Standardized method, field, property, and variable names
 * Cleaned up code and made more readable
 * Added support for xAPI 1.0.3
