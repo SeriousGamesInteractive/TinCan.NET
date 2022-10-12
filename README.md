@@ -3,6 +3,7 @@
 # Info
 
 A .NET Core C#/.NET library for implementing Tin Can API.
+Requires Unity Newton.Json from https://docs.unity3d.com/Packages/com.unity.nuget.newtonsoft-json@3.0/manual/index.html
 
 # About
 
